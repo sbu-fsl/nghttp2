@@ -55,3 +55,10 @@ _VC_ROOT/
 *.pyd
 *.egg-info/
 python/nghttp2.c
+
+# cscope
+cscope*
+
+# Thirdparty
+third-party/neverbleed
+
