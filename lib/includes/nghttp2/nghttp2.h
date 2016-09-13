@@ -776,12 +776,12 @@ typedef struct {
 } nghttp2_frame_hd;
 
 /**
- * @union
+ * @struct
  *
- * This union represents the some kind of data source passed to
+ * This struct represents the some kind of data source passed to
  * :type:`nghttp2_data_source_read_callback`.
  */
-typedef union {
+typedef struct {
   /**
    * The integer field, suitable for a file descriptor.
    */
@@ -790,6 +790,10 @@ typedef union {
    * The pointer to an arbitrary object.
    */
   void *ptr;
+  /*
+   * Amount of data in ptr
+   */
+  int total_len;
 } nghttp2_data_source;
 
 /**

@@ -1369,6 +1369,11 @@ void prepare_response(Stream *stream, Http2Handler *hd,
   nghttp2_data_provider data_prd;
 
   data_prd.source.fd = file_ent->fd;
+  data_prd.source.ptr = malloc(1024*64);
+
+  ssize_t nread;
+  nread = pread(data_prd.source.fd, data_prd.source.ptr, 1024*64, 0);
+  data_prd.source.total_len = nread;
   data_prd.read_callback = file_read_callback;
 
   hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
@@ -1634,24 +1639,17 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
     *p++ = padlen - 1;
   }
 
-  while (length) {
-    ssize_t nread;
-    while ((nread = pread(fd, p, length, stream->body_offset)) == -1 &&
-           errno == EINTR)
-      ;
+  do {
 
-    if (nread == -1) {
-      remove_stream_read_timeout(stream);
-      remove_stream_write_timeout(stream);
+    p = std::copy_n((char*) ((char*) source->ptr + stream->body_offset), length, p);
 
-      return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+    stream->body_offset += length;
+    if (stream->body_offset >= source->total_len) {
+        free(source->ptr);
     }
 
-    stream->body_offset += nread;
-    length -= nread;
-    p += nread;
-  }
-
+  } while(0);
+  
   if (padlen) {
     std::fill(p, p + padlen - 1, 0);
     p += padlen - 1;
