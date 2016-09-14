@@ -511,6 +511,18 @@ void writecb(struct ev_loop *loop, ev_io *w, int revents) {
 }
 } // namespace
 
+namespace {
+void asynccb(struct ev_loop *loop, ev_async *w, int revents) {
+  int rv;
+  auto handler = static_cast<Http2Handler *>(w->data);
+
+  rv = handler->on_write();
+  if (rv == -1) {
+    delete_handler(handler);
+  }
+}
+} // namespace
+
 Http2Handler::Http2Handler(Sessions *sessions, int fd, SSL *ssl,
                            int64_t session_id)
     : session_id_(session_id),
@@ -523,13 +535,16 @@ Http2Handler::Http2Handler(Sessions *sessions, int fd, SSL *ssl,
   ev_timer_init(&settings_timerev_, settings_timeout_cb, 10., 0.);
   ev_io_init(&wev_, writecb, fd, EV_WRITE);
   ev_io_init(&rev_, readcb, fd, EV_READ);
+  ev_async_init(&aev_, asynccb);
 
   settings_timerev_.data = this;
   wev_.data = this;
   rev_.data = this;
+  aev_.data = this;
 
   auto loop = sessions_->get_loop();
   ev_io_start(loop, &rev_);
+  ev_async_start(loop, &aev_);
 
   if (ssl) {
     SSL_set_accept_state(ssl);
@@ -640,7 +655,7 @@ int Http2Handler::read_clear() {
     }
   }
 
-  return write_(*this);
+  //return write_(*this);
 }
 
 int Http2Handler::write_clear() {
@@ -1064,6 +1079,18 @@ void Http2Handler::terminate_session(uint32_t error_code) {
   nghttp2_session_terminate_session(session_, error_code);
 }
 
+ev_io *Http2Handler::get_wev() {
+  return &wev_;
+}
+
+ev_async *Http2Handler::get_aev() {
+  return &aev_;
+}
+
+int Http2Handler::get_fd() {
+  return fd_;
+}
+
 ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
                            uint8_t *buf, size_t length, uint32_t *data_flags,
                            nghttp2_data_source *source, void *user_data) {
@@ -1298,86 +1325,14 @@ void prepare_response(Stream *stream, Http2Handler *hd,
     return;
   }
 
-  auto file_ent = sessions->get_cached_fd(file_path);
-
-  if (file_ent == nullptr) {
-    int file = open(file_path.c_str(), O_RDONLY | O_BINARY);
-    if (file == -1) {
-      prepare_status_response(stream, hd, 404);
-
-      return;
-    }
-
-    struct stat buf;
-
-    if (fstat(file, &buf) == -1) {
-      close(file);
-      prepare_status_response(stream, hd, 404);
-
-      return;
-    }
-
-    if (buf.st_mode & S_IFDIR) {
-      close(file);
-
-      auto reqpath = concat_string_ref(stream->balloc, raw_path,
-                                       StringRef::from_lit("/"), raw_query);
-
-      prepare_redirect_response(stream, hd, reqpath, 301);
-
-      return;
-    }
-
-    const std::string *content_type = nullptr;
-
-    auto ext = file_path.c_str() + file_path.size() - 1;
-    for (; file_path.c_str() < ext && *ext != '.' && *ext != '/'; --ext)
-      ;
-    if (*ext == '.') {
-      ++ext;
-
-      const auto &mime_types = hd->get_config()->mime_types;
-      auto content_type_itr = mime_types.find(ext);
-      if (content_type_itr != std::end(mime_types)) {
-        content_type = &(*content_type_itr).second;
-      }
-    }
-
-    file_ent = sessions->cache_fd(
-        file_path, FileEntry(file_path, buf.st_size, buf.st_mtime, file,
-                             content_type, ev_now(sessions->get_loop())));
-  }
-
-  stream->file_ent = file_ent;
-
-  if (last_mod_found && file_ent->mtime <= last_mod) {
-    hd->submit_response(StringRef::from_lit("304"), stream->stream_id, nullptr);
-
-    return;
-  }
-
-  auto method = stream->header.method;
-  if (method == StringRef::from_lit("HEAD")) {
-    hd->submit_file_response(StringRef::from_lit("200"), stream,
-                             file_ent->mtime, file_ent->length,
-                             file_ent->content_type, nullptr);
-    return;
-  }
-
-  stream->body_length = file_ent->length;
-
   nghttp2_data_provider data_prd;
-
-  data_prd.source.fd = file_ent->fd;
-  data_prd.source.ptr = malloc(1024*64);
-
-  ssize_t nread;
-  nread = pread(data_prd.source.fd, data_prd.source.ptr, 1024*64, 0);
-  data_prd.source.total_len = nread;
-  data_prd.read_callback = file_read_callback;
-
-  hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
-                           file_ent->length, file_ent->content_type, &data_prd);
+  struct ReadQ *element = NULL;
+  element = new ReadQ;
+  element->data_prd = &data_prd;
+  element->file_path = file_path;
+  element->hd = hd;
+  element->stream = stream;
+  add_to_ReadQ(element);
 }
 } // namespace
 
@@ -2217,6 +2172,144 @@ const StatusPage *HttpServer::get_status_page(int status) const {
     assert(0);
   }
   return nullptr;
+}
+
+nghttp2_queue ReadQueue;
+pthread_mutex_t readQ_mutex;
+pthread_t tid;
+
+void process_single(struct ReadQ* element)
+{
+    std::string file_path = element->file_path;
+    Stream* stream = element->stream;
+    Http2Handler *hd = element->hd;
+    nghttp2_data_provider *data_prd = element->data_prd;
+
+    int file = open(file_path.c_str(), O_RDONLY | O_BINARY);
+    if (file == -1) {
+      prepare_status_response(stream, hd, 404);
+    }
+
+    struct stat buf;
+
+    if (fstat(file, &buf) == -1) {
+      close(file);
+      prepare_status_response(stream, hd, 404);
+    }
+
+    if (buf.st_mode & S_IFDIR) {
+      close(file);
+
+      prepare_status_response(stream, hd, 301);
+    }
+
+    const std::string *content_type = nullptr;
+
+    auto ext = file_path.c_str() + file_path.size() - 1;
+    for (; file_path.c_str() < ext && *ext != '.' && *ext != '/'; --ext)
+      ;
+    if (*ext == '.') {
+      ++ext;
+
+      const auto &mime_types = hd->get_config()->mime_types;
+      auto content_type_itr = mime_types.find(ext);
+      if (content_type_itr != std::end(mime_types)) {
+        content_type = &(*content_type_itr).second;
+      }
+    }
+
+    auto sessions = hd->get_sessions();
+    auto file_ent = sessions->cache_fd(
+        file_path, FileEntry(file_path, buf.st_size, buf.st_mtime, file,
+                             content_type, ev_now(sessions->get_loop())));
+
+    stream->file_ent = file_ent;
+
+    auto method = stream->header.method;
+    if (method == StringRef::from_lit("HEAD")) {
+      hd->submit_file_response(StringRef::from_lit("200"), stream,
+                                file_ent->mtime, file_ent->length,
+                                file_ent->content_type, nullptr);
+    ev_async_send((hd->get_sessions())->get_loop(), hd->get_aev());
+    return;
+    }
+
+    stream->body_length = file_ent->length;
+
+    data_prd->source.fd = file_ent->fd;
+    data_prd->source.ptr = malloc(1024*64);
+
+    ssize_t nread;
+    nread = pread(data_prd->source.fd, data_prd->source.ptr, 1024*64, 0);
+    data_prd->source.total_len = nread;
+    data_prd->read_callback = file_read_callback;
+
+    hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
+                             file_ent->length, file_ent->content_type, data_prd);
+
+    //hd->on_write();
+    ev_async_send((hd->get_sessions())->get_loop(), hd->get_aev());
+    return;
+}
+
+#define MAX_OP 10
+
+void process_set(struct ReadQ **element_list, int count)
+{
+  int i=0;
+  std::cout << "Count - "<< count << "\n";
+  while (i<count) {
+    process_single(element_list[i]);
+    delete element_list[i];
+    i++;
+  }
+}
+
+void *process_readQ(void *arg)
+{
+  int count;
+  struct ReadQ* element[MAX_OP];
+  while (1) {
+    for (int j=0;j<MAX_OP;++j) element[j] = NULL;
+    count = 0;
+
+    pthread_mutex_lock(&readQ_mutex);
+
+    while (!nghttp2_queue_empty(&ReadQueue)) {
+      element[count] = (struct ReadQ*) nghttp2_queue_front(&ReadQueue);
+      nghttp2_queue_pop(&ReadQueue);
+      if (count++ >= MAX_OP) {
+        break;
+      }
+    }
+
+    pthread_mutex_unlock(&readQ_mutex);
+
+    if (count > 0) {
+      process_set(element, count);
+    }
+  }
+}
+
+int tc_worker_init()
+{
+  nghttp2_queue_init(&ReadQueue);
+  pthread_mutex_init(&readQ_mutex, NULL);
+  int err = pthread_create(&tid, NULL, &process_readQ, NULL);
+  if (err != 0) {
+    fprintf(stderr, "\nCan't create thread :[%s]", strerror(err));
+    return -1;
+  }
+  pthread_detach(tid);
+  return 0;
+}
+
+int add_to_ReadQ(struct ReadQ *element)
+{
+  pthread_mutex_lock(&readQ_mutex);
+  nghttp2_queue_push(&ReadQueue, element);
+  pthread_mutex_unlock(&readQ_mutex);
+  return 0;
 }
 
 } // namespace nghttp2

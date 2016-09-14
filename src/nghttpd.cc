@@ -438,6 +438,8 @@ int main(int argc, char **argv) {
 
   reset_timer();
 
+  tc_worker_init();
+
   HttpServer server(&config);
   if (server.run() != 0) {
     exit(EXIT_FAILURE);

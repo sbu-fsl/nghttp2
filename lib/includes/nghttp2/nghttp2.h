@@ -5227,6 +5227,21 @@ NGHTTP2_EXTERN int32_t nghttp2_stream_get_weight(nghttp2_stream *stream);
 NGHTTP2_EXTERN int32_t
 nghttp2_stream_get_sum_dependency_weight(nghttp2_stream *stream);
 
+typedef struct nghttp2_queue_cell {
+  void *data;
+  struct nghttp2_queue_cell *next;
+} nghttp2_queue_cell;
+
+typedef struct { nghttp2_queue_cell *front, *back; } nghttp2_queue;
+
+NGHTTP2_EXTERN void nghttp2_queue_init(nghttp2_queue *queue);
+NGHTTP2_EXTERN void nghttp2_queue_free(nghttp2_queue *queue);
+NGHTTP2_EXTERN int nghttp2_queue_push(nghttp2_queue *queue, void *data);
+NGHTTP2_EXTERN void nghttp2_queue_pop(nghttp2_queue *queue);
+NGHTTP2_EXTERN void *nghttp2_queue_front(nghttp2_queue *queue);
+NGHTTP2_EXTERN void *nghttp2_queue_back(nghttp2_queue *queue);
+NGHTTP2_EXTERN int nghttp2_queue_empty(nghttp2_queue *queue);
+
 #ifdef __cplusplus
 }
 #endif
