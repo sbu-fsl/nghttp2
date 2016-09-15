@@ -208,6 +208,37 @@ endif # HAVE_NEVERBLEED
 TESTS += nghttpx-unittest
 endif # HAVE_CUNIT
 
+build_type = debug
+nghttpd_LDADD = ${LDADD} ../../../tc_client/$(build_type)/tc/libtc_impl.a \
+	../../../tc_client/$(build_type)/posix/libtc_impl_posix.a \
+	../../../tc_client/$(build_type)/nfs4/libtc_impl_nfs4.a \
+	../../../tc_client/$(build_type)/util/libtc_util.a \
+	../../../tc_client/$(build_type)/MainNFSD/libMainServices.a \
+	../../../tc_client/$(build_type)/Protocols/NFS/libnfsproto.a \
+	../../../tc_client/$(build_type)/Protocols/NFS/libnfs4callbacks.a \
+	../../../tc_client/$(build_type)/Protocols/XDR/libnfs_mnt_xdr.a \
+	../../../tc_client/$(build_type)/SAL/libsal.a \
+	../../../tc_client/$(build_type)/cache_inode/libcache_inode.a \
+	../../../tc_client/$(build_type)/idmapper/libidmap.a \
+	../../../tc_client/$(build_type)/RPCAL/librpcal.a \
+	../../../tc_client/$(build_type)/support/libsupport.a \
+	../../../tc_client/$(build_type)/support/libstring_utils.a \
+	../../../tc_client/$(build_type)/support/libhash.a \
+	../../../tc_client/$(build_type)/support/libhashtable.a \
+	../../../tc_client/$(build_type)/support/libavltree.a \
+	../../../tc_client/$(build_type)/support/libuid2grp.a \
+	../../../tc_client/$(build_type)/support/libtc_helper.a \
+	../../../tc_client/$(build_type)/cidr/libcidr.a \
+	../../../tc_client/$(build_type)/FSAL/FSAL_PSEUDO/libfsalpseudo.a \
+	../../../tc_client/$(build_type)/NodeList/libNodeList.a \
+	../../../tc_client/$(build_type)/config_parsing/libconfig_parsing.a \
+	../../../tc_client/$(build_type)/libntirpc/src/libntirpc.a \
+	../../../tc_client/$(build_type)/os/libgos.a \
+	../../../tc_client/$(build_type)/log/liblog.a \
+	../../../tc_client/$(build_type)/util/libpath_utils.a \
+	-lwbclient -ljemalloc -lcap -lblkid -luuid -ldl -lkrb5 -lk5crypto \
+	-lcom_err -lgssapi_krb5 -lnfsidmap
+
 endif # ENABLE_APP
 
 if ENABLE_HPACK_TOOLS
