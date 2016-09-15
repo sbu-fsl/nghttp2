@@ -42,6 +42,7 @@
 #include <ev.h>
 
 #include <nghttp2/nghttp2.h>
+#include "nghttp2_queue.h"
 
 #include "http2.h"
 #include "buffer.h"
@@ -201,6 +202,9 @@ public:
   int write_tls();
 
   struct ev_loop *get_loop() const;
+  ev_io *get_wev();
+  ev_async *get_aev();
+  int get_fd();
 
   using WriteBuf = Buffer<64_k>;
 
@@ -209,6 +213,7 @@ public:
 private:
   ev_io wev_;
   ev_io rev_;
+  ev_async aev_;
   ev_timer settings_timerev_;
   std::map<int32_t, std::unique_ptr<Stream>> id2stream_;
   WriteBuf wb_;
@@ -243,6 +248,16 @@ private:
 ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
                            uint8_t *buf, size_t length, int *eof,
                            nghttp2_data_source *source, void *user_data);
+
+struct ReadQ {
+  Stream *stream;
+  std::string file_path;
+  Http2Handler *hd;
+  nghttp2_data_provider *data_prd;
+};
+
+int tc_worker_init();
+int add_to_ReadQ(struct ReadQ *element);
 
 } // namespace nghttp2
 
