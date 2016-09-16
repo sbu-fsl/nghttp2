@@ -791,6 +791,10 @@ typedef struct {
    */
   void *ptr;
   /*
+   * Data pointer
+   */
+  void *data; 
+  /*
    * Amount of data in ptr
    */
   int total_len;

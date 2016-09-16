@@ -48,6 +48,8 @@
 #include "buffer.h"
 #include "template.h"
 #include "allocator.h"
+#include "../../../tc_client/include/tc_api.h"
+#include "../../../tc_client/include/log.h"
 
 namespace nghttp2 {
 

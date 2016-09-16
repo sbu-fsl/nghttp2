@@ -1325,10 +1325,10 @@ void prepare_response(Stream *stream, Http2Handler *hd,
     return;
   }
 
-  nghttp2_data_provider data_prd;
+  auto data_prd = new nghttp2_data_provider;
   struct ReadQ *element = NULL;
   element = new ReadQ;
-  element->data_prd = &data_prd;
+  element->data_prd = data_prd;
   element->file_path = file_path;
   element->hd = hd;
   element->stream = stream;
@@ -1594,16 +1594,32 @@ int send_data_callback(nghttp2_session *session, nghttp2_frame *frame,
     *p++ = padlen - 1;
   }
 
-  do {
-
-    p = std::copy_n((char*) ((char*) source->ptr + stream->body_offset), length, p);
+  if (fd < 0) {
+    p = std::copy_n((char*) ((char*) source->data + stream->body_offset), length, p);
 
     stream->body_offset += length;
     if (stream->body_offset >= source->total_len) {
-        free(source->ptr);
+        free(source->data);
     }
+  } else {
+    while (length) {
+      ssize_t nread;
+      while ((nread = pread(fd, p, length, stream->body_offset)) == -1 &&
+             errno == EINTR)
+      ;
 
-  } while(0);
+      if (nread == -1) {
+        remove_stream_read_timeout(stream);
+        remove_stream_write_timeout(stream);
+
+        return NGHTTP2_ERR_TEMPORAL_CALLBACK_FAILURE;
+      }
+
+      stream->body_offset += nread;
+      length -= nread;
+      p += nread;
+    }
+  }
   
   if (padlen) {
     std::fill(p, p + padlen - 1, 0);
@@ -2180,76 +2196,71 @@ pthread_t tid;
 
 void process_single(struct ReadQ* element)
 {
-    std::string file_path = element->file_path;
-    Stream* stream = element->stream;
-    Http2Handler *hd = element->hd;
-    nghttp2_data_provider *data_prd = element->data_prd;
+   std::string file_path = element->file_path;
+   Stream* stream = element->stream;
+   Http2Handler *hd = element->hd;
+   nghttp2_data_provider *data_prd = element->data_prd;
+   auto sessions = hd->get_sessions();
+   struct tc_iovec read_iovec;
+   tc_res res;
 
-    int file = open(file_path.c_str(), O_RDONLY | O_BINARY);
-    if (file == -1) {
-      prepare_status_response(stream, hd, 404);
-    }
+   read_iovec.file = tc_file_from_path(file_path.c_str());
+   read_iovec.offset = 0;
+   read_iovec.length = 1024*64;
+   read_iovec.is_creation = 0;
+   data_prd->source.data = malloc(1024*64);
+   read_iovec.data = (char*) data_prd->source.data;
 
-    struct stat buf;
+   res = tc_readv(&read_iovec, 1, false);
 
-    if (fstat(file, &buf) == -1) {
-      close(file);
-      prepare_status_response(stream, hd, 404);
-    }
+   /* Check results. */
+   if (!tc_okay(res)) {
+     prepare_status_response(stream, hd, 404);
+     ev_async_send(sessions->get_loop(), hd->get_aev());
+     return;
+   }
 
-    if (buf.st_mode & S_IFDIR) {
-      close(file);
+   const std::string *content_type = nullptr;
 
-      prepare_status_response(stream, hd, 301);
-    }
+   auto ext = file_path.c_str() + file_path.size() - 1;
+   for (; file_path.c_str() < ext && *ext != '.' && *ext != '/'; --ext)
+     ;
+   if (*ext == '.') {
+     ++ext;
 
-    const std::string *content_type = nullptr;
+     const auto &mime_types = hd->get_config()->mime_types;
+     auto content_type_itr = mime_types.find(ext);
+     if (content_type_itr != std::end(mime_types)) {
+       content_type = &(*content_type_itr).second;
+     }
+   }
 
-    auto ext = file_path.c_str() + file_path.size() - 1;
-    for (; file_path.c_str() < ext && *ext != '.' && *ext != '/'; --ext)
-      ;
-    if (*ext == '.') {
-      ++ext;
+   auto file_ent = new FileEntry(file_path, read_iovec.length,
+                                 0 /* mtime */, -1 /* fd */, content_type,
+                                 ev_now(sessions->get_loop()));
 
-      const auto &mime_types = hd->get_config()->mime_types;
-      auto content_type_itr = mime_types.find(ext);
-      if (content_type_itr != std::end(mime_types)) {
-        content_type = &(*content_type_itr).second;
-      }
-    }
+   stream->file_ent = file_ent;
 
-    auto sessions = hd->get_sessions();
-    auto file_ent = sessions->cache_fd(
-        file_path, FileEntry(file_path, buf.st_size, buf.st_mtime, file,
-                             content_type, ev_now(sessions->get_loop())));
+   auto method = stream->header.method;
+   if (method == StringRef::from_lit("HEAD")) {
+     hd->submit_file_response(StringRef::from_lit("200"), stream,
+                               file_ent->mtime, file_ent->length,
+                               file_ent->content_type, nullptr);
+     ev_async_send(sessions->get_loop(), hd->get_aev());
+     return;
+   }
 
-    stream->file_ent = file_ent;
+   stream->body_length = file_ent->length;
 
-    auto method = stream->header.method;
-    if (method == StringRef::from_lit("HEAD")) {
-      hd->submit_file_response(StringRef::from_lit("200"), stream,
-                                file_ent->mtime, file_ent->length,
-                                file_ent->content_type, nullptr);
-    ev_async_send((hd->get_sessions())->get_loop(), hd->get_aev());
-    return;
-    }
+   data_prd->source.fd = file_ent->fd;
+   data_prd->source.total_len = read_iovec.length;
+   data_prd->read_callback = file_read_callback;
 
-    stream->body_length = file_ent->length;
-
-    data_prd->source.fd = file_ent->fd;
-    data_prd->source.ptr = malloc(1024*64);
-
-    ssize_t nread;
-    nread = pread(data_prd->source.fd, data_prd->source.ptr, 1024*64, 0);
-    data_prd->source.total_len = nread;
-    data_prd->read_callback = file_read_callback;
-
-    hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
+   hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
                              file_ent->length, file_ent->content_type, data_prd);
 
-    //hd->on_write();
-    ev_async_send((hd->get_sessions())->get_loop(), hd->get_aev());
-    return;
+   ev_async_send(sessions->get_loop(), hd->get_aev());
+   return;
 }
 
 #define MAX_OP 10
@@ -2291,6 +2302,8 @@ void *process_readQ(void *arg)
   }
 }
 
+#define DEFAULT_LOG_FILE "/tmp/tc_nghttpd.log"
+
 int tc_worker_init()
 {
   nghttp2_queue_init(&ReadQueue);
@@ -2301,6 +2314,21 @@ int tc_worker_init()
     return -1;
   }
   pthread_detach(tid);
+  char tc_config_path[PATH_MAX];
+  snprintf(tc_config_path, PATH_MAX,
+           "/home/ashok/work/fsl/fsl-nfs-ganesha/config/tc.ganesha.conf");
+  fprintf(stderr, "using config file: %s\n", tc_config_path);
+
+  void *context = NULL;
+  /* Initialize TC services and daemons */
+  context = tc_init(tc_config_path, DEFAULT_LOG_FILE, 77);
+  if (context == NULL) {
+        std::cout << "Error while initializing tc_client using config " <<
+                 "file: " << tc_config_path << "; see log at " <<
+                  DEFAULT_LOG_FILE;
+        return EIO;
+  }
+
   return 0;
 }
 

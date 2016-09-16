@@ -239,6 +239,8 @@ nghttpd_LDADD = ${LDADD} ../../../tc_client/$(build_type)/tc/libtc_impl.a \
 	-lwbclient -ljemalloc -lcap -lblkid -luuid -ldl -lkrb5 -lk5crypto \
 	-lcom_err -lgssapi_krb5 -lnfsidmap
 
+nghttpd_LDFLAGS = -rdynamic
+
 endif # ENABLE_APP
 
 if ENABLE_HPACK_TOOLS
