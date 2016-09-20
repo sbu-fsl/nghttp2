@@ -20,6 +20,9 @@ yum install -y boost-filesystem
 yum install -y boost-thread
 yum install -y python-devel
 yum install -y ruby
+yum install -y libwbclient-devel
+yum install -y libcap-devel
+yum install -y libblkid-devel
 
 if [ ! -e deps ]; then
 	mkdir deps
