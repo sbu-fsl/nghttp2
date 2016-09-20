@@ -1329,6 +1329,7 @@ void prepare_response(Stream *stream, Http2Handler *hd,
   struct ReadQ *element = NULL;
   element = new ReadQ;
   element->data_prd = data_prd;
+  data_prd->source.data = NULL;
   element->file_path = file_path;
   element->hd = hd;
   element->stream = stream;
@@ -2194,24 +2195,36 @@ nghttp2_queue ReadQueue;
 pthread_mutex_t readQ_mutex;
 pthread_t tid;
 
-void process_single(struct ReadQ* element)
+#define MAX_FILE_SIZE 100000
+
+void add_to_iovec(struct ReadQ* element,
+                  struct tc_iovec* read_iovec)
+{
+   std::string file_path = element->file_path;
+   nghttp2_data_provider *data_prd = element->data_prd;
+
+   read_iovec->file = tc_file_from_path(file_path.c_str());
+   read_iovec->offset = 0;
+   read_iovec->length = MAX_FILE_SIZE;
+   read_iovec->is_creation = 0;
+   data_prd->source.data = malloc(MAX_FILE_SIZE);
+   if (data_prd->source.data == NULL) {
+        std::cout<"Malloc failed\n";
+        return;
+   }
+   read_iovec->data = (char*) data_prd->source.data;
+   return;
+}
+
+void process_reply(struct ReadQ* element,
+                   struct tc_iovec* read_iovec,
+                   tc_res res)
 {
    std::string file_path = element->file_path;
    Stream* stream = element->stream;
    Http2Handler *hd = element->hd;
    nghttp2_data_provider *data_prd = element->data_prd;
    auto sessions = hd->get_sessions();
-   struct tc_iovec read_iovec;
-   tc_res res;
-
-   read_iovec.file = tc_file_from_path(file_path.c_str());
-   read_iovec.offset = 0;
-   read_iovec.length = 1024*64;
-   read_iovec.is_creation = 0;
-   data_prd->source.data = malloc(1024*64);
-   read_iovec.data = (char*) data_prd->source.data;
-
-   res = tc_readv(&read_iovec, 1, false);
 
    /* Check results. */
    if (!tc_okay(res)) {
@@ -2235,7 +2248,7 @@ void process_single(struct ReadQ* element)
      }
    }
 
-   auto file_ent = new FileEntry(file_path, read_iovec.length,
+   auto file_ent = new FileEntry(file_path, read_iovec->length,
                                  0 /* mtime */, -1 /* fd */, content_type,
                                  ev_now(sessions->get_loop()));
 
@@ -2253,7 +2266,7 @@ void process_single(struct ReadQ* element)
    stream->body_length = file_ent->length;
 
    data_prd->source.fd = file_ent->fd;
-   data_prd->source.total_len = read_iovec.length;
+   data_prd->source.total_len = read_iovec->length;
    data_prd->read_callback = file_read_callback;
 
    hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
@@ -2267,21 +2280,41 @@ void process_single(struct ReadQ* element)
 
 void process_set(struct ReadQ **element_list, int count)
 {
-  int i=0;
-  std::cout << "Count - "<< count << "\n";
-  while (i<count) {
-    process_single(element_list[i]);
+  volatile auto i=0;
+  struct tc_iovec read_iovec[MAX_OP];
+  struct tc_iovec *cur_iovec = NULL;
+  tc_res res;
+
+  while (i < count) {
+    cur_iovec = read_iovec + i;
+    add_to_iovec(element_list[i], cur_iovec);
+    ++i;
+  }
+
+  res = tc_readv(read_iovec, count, false);
+
+  i = 0;
+  while (i < count) {
+    cur_iovec = read_iovec + i;
+    process_reply(element_list[i], cur_iovec, res);
     delete element_list[i];
-    i++;
+    ++i;
   }
 }
 
 void *process_readQ(void *arg)
 {
   int count;
+  int milisec = 5; // in miliseconds
+  struct timespec req = {0};
   struct ReadQ* element[MAX_OP];
+
+  req.tv_sec = 0;
+  req.tv_nsec = milisec * 1000000L;
+
   while (1) {
-    for (int j=0;j<MAX_OP;++j) element[j] = NULL;
+    //nanosleep(&req, (struct timespec *)NULL);
+    for (int j = 0;j < MAX_OP;++j) element[j] = NULL;
     count = 0;
 
     pthread_mutex_lock(&readQ_mutex);
@@ -2290,6 +2323,7 @@ void *process_readQ(void *arg)
       element[count] = (struct ReadQ*) nghttp2_queue_front(&ReadQueue);
       nghttp2_queue_pop(&ReadQueue);
       if (count++ >= MAX_OP) {
+        count = MAX_OP;
         break;
       }
     }
