@@ -2322,7 +2322,7 @@ void *process_readQ(void *arg)
     while (!nghttp2_queue_empty(&ReadQueue)) {
       element[count] = (struct ReadQ*) nghttp2_queue_front(&ReadQueue);
       nghttp2_queue_pop(&ReadQueue);
-      if (count++ >= MAX_OP) {
+      if (++count == MAX_OP) {
         count = MAX_OP;
         break;
       }
