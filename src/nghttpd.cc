@@ -191,6 +191,7 @@ int main(int argc, char **argv) {
   Config config;
   bool color = false;
   auto mime_types_file_set_manually = false;
+  bool tc_no_cache = false;
 
   while (1) {
     static int flag = 0;
@@ -219,6 +220,7 @@ int main(int argc, char **argv) {
         {"echo-upload", no_argument, &flag, 8},
         {"mime-types-file", required_argument, &flag, 9},
         {"no-content-length", no_argument, &flag, 10},
+        {"no-tc-cache", no_argument, &flag, 11},
         {nullptr, 0, nullptr, 0}};
     int option_index = 0;
     int c = getopt_long(argc, argv, "DVb:c:d:ehm:n:p:va:w:W:", long_options,
@@ -375,6 +377,10 @@ int main(int argc, char **argv) {
         // no-content-length option
         config.no_content_length = true;
         break;
+      case 11:
+        // Dont use cache for tc
+        tc_no_cache = true;
+        break;
       }
       break;
     default:
@@ -438,7 +444,7 @@ int main(int argc, char **argv) {
 
   reset_timer();
 
-  tc_worker_init();
+  tc_worker_init(tc_no_cache);
 
   HttpServer server(&config);
   if (server.run() != 0) {

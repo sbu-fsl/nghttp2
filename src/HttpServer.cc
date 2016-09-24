@@ -1331,6 +1331,7 @@ void prepare_response(Stream *stream, Http2Handler *hd,
   element->data_prd = data_prd;
   data_prd->source.data = NULL;
   element->file_path = file_path;
+  element->url_path = path;
   element->hd = hd;
   element->stream = stream;
   add_to_ReadQ(element);
@@ -2194,6 +2195,7 @@ const StatusPage *HttpServer::get_status_page(int status) const {
 nghttp2_queue ReadQueue;
 pthread_mutex_t readQ_mutex;
 pthread_t tid;
+int tc_no_cache;
 
 #define MAX_FILE_SIZE 100000
 
@@ -2302,6 +2304,187 @@ void process_set(struct ReadQ **element_list, int count)
   }
 }
 
+std::string convert_path_to_full(Http2Handler *hd, StringRef path) {
+    std::string file_path;
+
+    auto len = hd->get_config()->htdocs.size() + path.size();
+
+    auto trailing_slash = path[path.size() - 1] == '/';
+    if (trailing_slash) {
+      len += DEFAULT_HTML.size();
+    }
+
+    file_path.resize(len);
+
+    auto p = &file_path[0];
+
+    auto &htdocs = hd->get_config()->htdocs;
+    p = std::copy(std::begin(htdocs), std::end(htdocs), p);
+    p = std::copy(std::begin(path), std::end(path), p);
+    if (trailing_slash) {
+      std::copy(std::begin(DEFAULT_HTML), std::end(DEFAULT_HTML), p);
+    }
+
+    return file_path;
+}
+
+#define MAX_PUSH_COUNT 100
+
+void process_reply_cache(struct ReadQ* element)
+{
+   std::string file_path = element->file_path;
+   StringRef url_path = element->url_path;
+   Stream* stream = element->stream;
+   Http2Handler *hd = element->hd;
+   nghttp2_data_provider *data_prd = element->data_prd;
+   auto sessions = hd->get_sessions();
+   struct tc_iovec read_iovec[MAX_PUSH_COUNT];
+   tc_res res;
+   struct dCache *cache_entry[MAX_PUSH_COUNT];
+   std::string index_str("index.html");
+   std::string push_strings[MAX_PUSH_COUNT];
+   int length_read = 0;
+   int num_strings = 0;
+   int i = 0;
+
+   if (file_path.find(index_str) != std::string::npos) {
+     // It is for index.html, so read-ahead all the to-be-pushed files
+     read_iovec[i].file = tc_file_from_path(file_path.c_str());
+     read_iovec[i].offset = 0;
+     read_iovec[i].length = MAX_FILE_SIZE;
+     read_iovec[i].is_creation = 0;
+     data_prd->source.data = malloc(MAX_FILE_SIZE);
+     if (data_prd->source.data == NULL) {
+        std::cout << "Malloc failed\n";
+        return;
+     }
+     read_iovec->data = (char*) data_prd->source.data;
+     i++;
+
+     // Now do the read-ahead and put it in hd->data_cache
+
+     //num_strings = hd->get_config()->push[path.str()].count;
+
+     auto push_itr = hd->get_config()->push.find(url_path.str());
+     if (push_itr != std::end(hd->get_config()->push)) {
+       for (auto &push_path : (*push_itr).second) {
+
+         push_strings[i] = convert_path_to_full(hd, StringRef{push_path});
+         read_iovec[i].file = tc_file_from_path(push_strings[i].c_str());
+         read_iovec[i].offset = 0;
+         read_iovec[i].length = MAX_FILE_SIZE;
+         read_iovec[i].is_creation = 0;
+         read_iovec[i].data = NULL;
+         read_iovec[i].data = (char*) malloc(MAX_FILE_SIZE);
+         if (read_iovec[i].data == NULL) {
+           std::cout<"Malloc failed\n";
+           return;
+         }
+
+         i++;
+       }
+     } // End of push strings, now move to calling tc_readv()
+
+     num_strings = i;
+     //std::cout<<"Number of elements in iovec - "<< num_strings<<"\n";
+     res = tc_readv(read_iovec, num_strings, false);
+     if (!tc_okay(res)) {
+       prepare_status_response(stream, hd, 404);
+       i = 1;
+       while (i < num_strings) {
+         cache_entry[i] = new dCache;
+         cache_entry[i]->res = res;
+         hd->data_cache[push_strings[i]] = (void*) cache_entry[i];
+         i++;
+       }
+
+       ev_async_send(sessions->get_loop(), hd->get_aev());
+       return;
+     }
+
+     data_prd->source.data = read_iovec[0].data;
+     length_read = read_iovec[0].length;
+     data_prd->source.total_len = length_read;
+     i = 1;
+     while (i < num_strings) {
+       cache_entry[i] = new dCache;
+       cache_entry[i]->res = res;
+       cache_entry[i]->data = read_iovec[i].data;
+       cache_entry[i]->len = read_iovec[i].length;
+       hd->data_cache[push_strings[i]] = (void*)cache_entry[i];
+       i++;
+     }
+     
+   } else {
+     // We should have already read the contents, check hd's cache
+     cache_entry[0] = (struct dCache*)hd->data_cache[file_path];
+     if (!tc_okay(cache_entry[0]->res)) {
+       prepare_status_response(stream, hd, 404);
+       ev_async_send(sessions->get_loop(), hd->get_aev());
+       return;
+     }
+
+     //std::cout<<"Entry found in cache\n";
+     data_prd->source.data = cache_entry[0]->data;
+     length_read = cache_entry[0]->len;
+     data_prd->source.total_len = length_read;
+     delete cache_entry[0];
+   }
+
+   const std::string *content_type = nullptr;
+
+   auto ext = file_path.c_str() + file_path.size() - 1;
+   for (; file_path.c_str() < ext && *ext != '.' && *ext != '/'; --ext)
+     ;
+   if (*ext == '.') {
+     ++ext;
+
+     const auto &mime_types = hd->get_config()->mime_types;
+     auto content_type_itr = mime_types.find(ext);
+     if (content_type_itr != std::end(mime_types)) {
+       content_type = &(*content_type_itr).second;
+     }
+   }
+
+   auto file_ent = new FileEntry(file_path, length_read,
+                                 0 /* mtime */, -1 /* fd */, content_type,
+                                 ev_now(sessions->get_loop()));
+
+   stream->file_ent = file_ent;
+
+   auto method = stream->header.method;
+   if (method == StringRef::from_lit("HEAD")) {
+     hd->submit_file_response(StringRef::from_lit("200"), stream,
+                               file_ent->mtime, file_ent->length,
+                               file_ent->content_type, nullptr);
+     ev_async_send(sessions->get_loop(), hd->get_aev());
+     return;
+   }
+
+   stream->body_length = file_ent->length;
+
+   data_prd->source.fd = file_ent->fd;
+   data_prd->read_callback = file_read_callback;
+
+   hd->submit_file_response(StringRef::from_lit("200"), stream, file_ent->mtime,
+                             file_ent->length, file_ent->content_type, data_prd);
+
+   ev_async_send(sessions->get_loop(), hd->get_aev());
+   return;
+}
+
+
+void process_using_cache(struct ReadQ **element_list, int count)
+{
+  volatile auto i=0;
+
+  while(i < count) {
+    process_reply_cache(element_list[i]);
+    delete element_list[i];
+    i++;
+  }
+}
+
 void *process_readQ(void *arg)
 {
   int count;
@@ -2331,14 +2514,18 @@ void *process_readQ(void *arg)
     pthread_mutex_unlock(&readQ_mutex);
 
     if (count > 0) {
-      process_set(element, count);
+      if (tc_no_cache) {
+        process_set(element, count);
+      } else {
+        process_using_cache(element, count);
+      }
     }
   }
 }
 
 #define DEFAULT_LOG_FILE "/tmp/tc_nghttpd.log"
 
-int tc_worker_init()
+int tc_worker_init(bool no_cache)
 {
   nghttp2_queue_init(&ReadQueue);
   pthread_mutex_init(&readQ_mutex, NULL);
@@ -2362,6 +2549,8 @@ int tc_worker_init()
                   DEFAULT_LOG_FILE;
         return EIO;
   }
+
+  tc_no_cache = no_cache;
 
   return 0;
 }
