@@ -2339,6 +2339,7 @@ void process_reply_cache(struct ReadQ* element)
    nghttp2_data_provider *data_prd = element->data_prd;
    auto sessions = hd->get_sessions();
    struct tc_iovec read_iovec[MAX_PUSH_COUNT];
+   struct tc_attrs getattr_iovec[MAX_PUSH_COUNT];
    tc_res res;
    struct dCache *cache_entry[MAX_PUSH_COUNT];
    std::string index_str("index.html");
@@ -2350,15 +2351,9 @@ void process_reply_cache(struct ReadQ* element)
    if (file_path.find(index_str) != std::string::npos) {
      // It is for index.html, so read-ahead all the to-be-pushed files
      read_iovec[i].file = tc_file_from_path(file_path.c_str());
-     read_iovec[i].offset = 0;
-     read_iovec[i].length = MAX_FILE_SIZE;
-     read_iovec[i].is_creation = 0;
-     data_prd->source.data = malloc(MAX_FILE_SIZE);
-     if (data_prd->source.data == NULL) {
-        std::cout << "Malloc failed\n";
-        return;
-     }
-     read_iovec->data = (char*) data_prd->source.data;
+     getattr_iovec[i].file = tc_file_from_path(file_path.c_str());
+     getattr_iovec[i].masks = TC_ATTRS_MASK_NONE;
+     getattr_iovec[i].masks.has_size = true;
      i++;
 
      // Now do the read-ahead and put it in hd->data_cache
@@ -2370,16 +2365,10 @@ void process_reply_cache(struct ReadQ* element)
        for (auto &push_path : (*push_itr).second) {
 
          push_strings[i] = convert_path_to_full(hd, StringRef{push_path});
+         getattr_iovec[i].file = tc_file_from_path(push_strings[i].c_str());
+         getattr_iovec[i].masks = TC_ATTRS_MASK_NONE;
+         getattr_iovec[i].masks.has_size = true;
          read_iovec[i].file = tc_file_from_path(push_strings[i].c_str());
-         read_iovec[i].offset = 0;
-         read_iovec[i].length = MAX_FILE_SIZE;
-         read_iovec[i].is_creation = 0;
-         read_iovec[i].data = NULL;
-         read_iovec[i].data = (char*) malloc(MAX_FILE_SIZE);
-         if (read_iovec[i].data == NULL) {
-           std::cout<"Malloc failed\n";
-           return;
-         }
 
          i++;
        }
@@ -2387,6 +2376,34 @@ void process_reply_cache(struct ReadQ* element)
 
      num_strings = i;
      //std::cout<<"Number of elements in iovec - "<< num_strings<<"\n";
+     res = tc_getattrsv(getattr_iovec, num_strings, false);
+
+     i = 0;
+     read_iovec[i].offset = 0;
+     read_iovec[i].length = getattr_iovec[i].size;
+     read_iovec[i].is_creation = 0;
+     data_prd->source.data = malloc(getattr_iovec[i].size);
+     if (data_prd->source.data == NULL) {
+        std::cout << "Malloc failed\n";
+        return;
+     }
+     read_iovec[i].data = (char*) data_prd->source.data;
+     i++;
+
+     while (i < num_strings) {
+         read_iovec[i].offset = 0;
+         read_iovec[i].length = getattr_iovec[i].size;
+         read_iovec[i].is_creation = 0;
+         read_iovec[i].data = NULL;
+         read_iovec[i].data = (char*) malloc(getattr_iovec[i].size);
+         if (read_iovec[i].data == NULL) {
+           std::cout<"Malloc failed\n";
+           return;
+         }
+
+         i++;
+     }
+     
      res = tc_readv(read_iovec, num_strings, false);
      if (!tc_okay(res)) {
        prepare_status_response(stream, hd, 404);
