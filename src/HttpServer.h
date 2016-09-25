@@ -34,6 +34,7 @@
 
 #include <string>
 #include <vector>
+#include <unordered_map>
 #include <map>
 #include <memory>
 
@@ -156,6 +157,13 @@ struct Stream {
 
 class Sessions;
 
+struct dCache {
+  tc_res res;
+  void *data;
+  int len;
+};
+
+
 class Http2Handler {
 public:
   Http2Handler(Sessions *sessions, int fd, SSL *ssl, int64_t session_id);
@@ -211,6 +219,7 @@ public:
   using WriteBuf = Buffer<64_k>;
 
   WriteBuf *get_wb();
+  std::unordered_map<std::string, void*> data_cache;
 
 private:
   ev_io wev_;
@@ -254,11 +263,12 @@ ssize_t file_read_callback(nghttp2_session *session, int32_t stream_id,
 struct ReadQ {
   Stream *stream;
   std::string file_path;
+  StringRef url_path;
   Http2Handler *hd;
   nghttp2_data_provider *data_prd;
 };
 
-int tc_worker_init();
+int tc_worker_init(bool tc_no_cache);
 int add_to_ReadQ(struct ReadQ *element);
 
 } // namespace nghttp2
