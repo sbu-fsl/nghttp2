@@ -2554,7 +2554,7 @@ int tc_worker_init(bool no_cache)
   pthread_detach(tid);
   char tc_config_path[PATH_MAX];
   snprintf(tc_config_path, PATH_MAX,
-           "/home/ashok/work/fsl/fsl-nfs-ganesha/config/tc.ganesha.conf");
+           "/root/txcompound/fsl-nfs-ganesha/config/tc.ganesha.conf");
   fprintf(stderr, "using config file: %s\n", tc_config_path);
 
   void *context = NULL;
