@@ -158,7 +158,7 @@ struct Stream {
 class Sessions;
 
 struct dCache {
-  tc_res res;
+  vres res;
   void *data;
   int len;
 };
