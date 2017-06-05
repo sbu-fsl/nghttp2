@@ -208,7 +208,7 @@ endif # HAVE_NEVERBLEED
 TESTS += nghttpx-unittest
 endif # HAVE_CUNIT
 
-build_type = debug
+build_type = release
 nghttpd_LDADD = ${LDADD} ../../../tc_client/$(build_type)/tc/libtc_impl.a \
 	../../../tc_client/$(build_type)/posix/libtc_impl_posix.a \
 	../../../tc_client/$(build_type)/nfs4/libtc_impl_nfs4.a \
@@ -235,12 +235,12 @@ nghttpd_LDADD = ${LDADD} ../../../tc_client/$(build_type)/tc/libtc_impl.a \
 	../../../tc_client/$(build_type)/config_parsing/libconfig_parsing.a \
 	../../../tc_client/$(build_type)/libntirpc/src/libntirpc.a \
 	../../../tc_client/$(build_type)/os/libgos.a \
-	../../../tc_client/$(build_type)/log/liblog.a \
 	../../../tc_client/$(build_type)/util/libpath_utils.a \
+	../../../tc_client/$(build_type)/log/liblog.a \
 	-lwbclient -ljemalloc -lcap -lblkid -luuid -ldl -lkrb5 -lk5crypto \
-	-lcom_err -lgssapi_krb5 -lnfsidmap
+	-lcom_err -lgssapi_krb5 -lnfsidmap -lPocoFoundation
 
-nghttpd_LDFLAGS = -rdynamic
+nghttpd_LDFLAGS = -rdynamic  -Wl,--start-group
 
 endif # ENABLE_APP
 
